@@ -60,9 +60,10 @@ Set these as repo secrets/variables or edit the workflow `env:` block:
 |---|---|---|
 | `NTFY_TOPIC` | (required) | Your ntfy topic name |
 | `MAX_YEARS` | `4` | Keep a role only if its stated experience minimum is at or below this. Roles that state no number are kept and labelled "exp: not stated" |
+| `US_ONLY` | `true` | Keep only US, US-remote, and unspecified-location roles; drop clearly non-US ones |
 | `INCLUDE_TITLES` | software engineer, software developer, swe, sde, backend engineer, engineer ii, engineer 2, se2, se ii | Title must contain one of these |
 | `EXCLUDE_TITLES` | senior, sr., staff, principal, lead, manager, director, architect, head of, intern, iii, iv, l3, l4, l5 | Title is dropped if it contains any of these (filters out > 4-yr / wrong-level roles) |
-| `JOB_WINDOW_HOURS` | `26` | How recent a posting must be to count |
+| `JOB_WINDOW_HOURS` | `48` | How recent a posting must be to count (48h gives more coverage; a role may notify on two consecutive mornings) |
 | `NOTIFY_WHEN_EMPTY` | `false` | Set `true` to also get a "nothing new" ping |
 
 The experience cap reads each job description and pulls the smallest plausible

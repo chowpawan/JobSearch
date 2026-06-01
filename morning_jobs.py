@@ -82,8 +82,33 @@ EXCLUDE_TITLES = [t.strip().lower() for t in os.getenv(
 # (roles that state no number are kept and labelled "exp: not stated").
 MAX_YEARS = int(os.getenv("MAX_YEARS", "4"))
 
-# "Hot / recently opened" = posted within this many hours. 26h suits a daily 5:30 run.
-WINDOW_HOURS = int(os.getenv("JOB_WINDOW_HOURS", "26"))
+# "Hot / recently opened" = posted within this many hours.
+WINDOW_HOURS = int(os.getenv("JOB_WINDOW_HOURS", "48"))
+
+# Keep only US-based (or US-remote / unspecified) roles. Set US_ONLY=false to allow all.
+US_ONLY = os.getenv("US_ONLY", "true").lower() == "true"
+
+_US_STATES = ("al ak az ar ca co ct de fl ga hi id il in ia ks ky la me md ma mi mn ms mo "
+              "mt ne nv nh nj nm ny nc nd oh ok or pa ri sc sd tn tx ut vt va wa wv wi wy dc").split()
+_US_STATE_RE = re.compile(r',\s*(' + '|'.join(_US_STATES) + r')\b', re.I)
+_US_HINTS = [
+    "united states", "usa", "u.s.", "u.s.a", "remote - us", "remote, us", "remote (us",
+    "us remote", "new york", "san francisco", "seattle", "austin", "boston", "chicago",
+    "los angeles", "denver", "atlanta", "mountain view", "palo alto", "sunnyvale", "san jose",
+    "bellevue", "san mateo", "redwood city", "menlo park", "cambridge", "brooklyn", "bay area",
+]
+_NON_US = [
+    "india", "bengaluru", "bangalore", "hyderabad", "gurgaon", "gurugram", "pune", "mumbai",
+    "chennai", "noida", "delhi", "canada", "toronto", "vancouver", "montreal", "united kingdom",
+    "london", "manchester", "ireland", "dublin", "germany", "berlin", "munich", "france", "paris",
+    "netherlands", "amsterdam", "spain", "madrid", "barcelona", "portugal", "lisbon", "poland",
+    "krakow", "warsaw", "romania", "bucharest", "singapore", "australia", "sydney", "melbourne",
+    "new zealand", "japan", "tokyo", "china", "shanghai", "hong kong", "korea", "seoul", "taiwan",
+    "israel", "tel aviv", "brazil", "mexico", "colombia", "argentina", "sweden", "switzerland",
+    "zurich", "united arab emirates", "dubai", "uae", "philippines", "vietnam", "indonesia",
+    "malaysia", "thailand", "italy", "milan", "austria", "vienna", "belgium", "denmark", "norway",
+    "finland", "greece", "czech", "prague", "emea", "apac", "latam",
+]
 
 NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")
@@ -135,6 +160,16 @@ def title_ok(title):
     if any(k in t for k in EXCLUDE_TITLES):
         return False
     return True
+
+
+def location_ok(loc):
+    """Keep US, US-remote, and unspecified roles; drop clearly non-US ones."""
+    if not US_ONLY:
+        return True
+    l = (loc or "").lower()
+    has_us = any(h in l for h in _US_HINTS) or bool(_US_STATE_RE.search(loc or ""))
+    has_non_us = any(c in l for c in _NON_US)
+    return has_us or not has_non_us
 
 
 def fetch_greenhouse(token):
@@ -200,6 +235,8 @@ def select(jobs):
             continue
         if not title_ok(j["title"]):
             continue
+        if not location_ok(j["location"]):
+            continue
         yrs = min_years(j["desc"])
         if yrs is not None and yrs > MAX_YEARS:
             continue
@@ -226,7 +263,7 @@ def notify(title, body):
 
 
 def main():
-    found, errors = [], []
+    found, errors, ok = [], [], 0
     for c in COMPANIES:
         fetch = FETCHERS.get(c.get("ats"))
         token = c.get("token", "")
@@ -234,16 +271,20 @@ def main():
             continue
         try:
             jobs = select(fetch(token))
+            ok += 1
             for j in jobs:
                 j["company"] = c["name"]
             found.extend(jobs)
         except Exception as e:  # noqa: BLE001
-            errors.append(f"{c['name']}: {e}")
+            errors.append(f"{c['name']} ({c['ats']}/{token}): {e}")
 
     found.sort(key=lambda j: j["posted"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
 
+    print(f"[summary] {ok}/{len(COMPANIES)} boards reachable, "
+          f"{len(errors)} skipped (bad/stale token), {len(found)} matching role(s).")
     if errors:
-        print("[warnings]\n  " + "\n  ".join(errors), file=sys.stderr)
+        print("[warnings] skipped boards -- fix or remove these tokens:\n  " + "\n  ".join(errors),
+              file=sys.stderr)
 
     if not found:
         msg = f"No new SE2/SWE roles (<= {MAX_YEARS} yrs) in the last {WINDOW_HOURS}h."
