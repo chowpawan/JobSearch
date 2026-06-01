@@ -1,0 +1,28 @@
+name: morning-jobs
+
+on:
+  schedule:
+    # GitHub cron is in UTC and has no timezone support.
+    # 12:30 UTC = 5:30 AM Pacific during PDT (summer, ~Mar-Nov).
+    # During PST (winter) this arrives at 4:30 AM; change to "30 13 * * *" then,
+    # or just accept the one-hour seasonal drift.
+    - cron: "30 12 * * *"
+  workflow_dispatch: {}   # lets you run it on demand from the Actions tab
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Pull hot jobs and push notification
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          MAX_YEARS: "4"
+          JOB_WINDOW_HOURS: "26"
+          # INCLUDE_TITLES: "software engineer,swe,sde,backend engineer,engineer ii,se2"
+          # EXCLUDE_TITLES: "senior,staff,principal,lead,manager,director,iii,iv"
+          # NOTIFY_WHEN_EMPTY: "false"
+        run: python morning_jobs.py

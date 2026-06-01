@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""
+Morning jobs: pull recently-opened Software Engineer / SE2-level roles (<= 4 years
+experience) from company career boards and push a notification to your phone via
+ntfy.sh.
+
+Standard library only (no pip install needed), so it runs in a bare GitHub Actions
+runner. Edit the COMPANIES list below; tune the rest via environment variables.
+"""
+
+import html
+import json
+import os
+import re
+import sys
+import urllib.request
+from datetime import datetime, timezone, timedelta
+
+# --------------------------------------------------------------------------
+# 1) EDIT THIS LIST. ats: "greenhouse" or "lever". token: board slug (see README).
+#    Entries left as "REPLACE_ME" are skipped.
+# --------------------------------------------------------------------------
+COMPANIES = [
+    # Well-known, regular H-1B sponsors that use Greenhouse. Token = the slug in
+    # their careers URL (boards.greenhouse.io/<token>). The first two are verified
+    # live; the rest follow the same lowercase-name convention -- do the 30-second
+    # browser check in the README before relying on each (ATS choices change).
+    {"name": "Databricks", "ats": "greenhouse", "token": "databricks"},   # verified
+    {"name": "Coinbase",   "ats": "greenhouse", "token": "coinbase"},     # verified
+    {"name": "Pinterest",  "ats": "greenhouse", "token": "pinterest"},
+    {"name": "DoorDash",   "ats": "greenhouse", "token": "doordash"},
+    {"name": "Robinhood",  "ats": "greenhouse", "token": "robinhood"},
+    {"name": "Plaid",      "ats": "greenhouse", "token": "plaid"},
+    {"name": "Affirm",     "ats": "greenhouse", "token": "affirm"},
+    {"name": "Reddit",     "ats": "greenhouse", "token": "reddit"},
+    {"name": "Dropbox",    "ats": "greenhouse", "token": "dropbox"},
+    {"name": "Airbnb",     "ats": "greenhouse", "token": "airbnb"},
+    {"name": "Twilio",     "ats": "greenhouse", "token": "twilio"},
+    {"name": "Cloudflare", "ats": "greenhouse", "token": "cloudflare"},
+    {"name": "Datadog",    "ats": "greenhouse", "token": "datadog"},
+    {"name": "Confluent",  "ats": "greenhouse", "token": "confluent"},
+    {"name": "HashiCorp",  "ats": "greenhouse", "token": "hashicorp"},
+    {"name": "Roblox",     "ats": "greenhouse", "token": "roblox"},
+    {"name": "Instacart",  "ats": "greenhouse", "token": "instacart"},
+    {"name": "Lyft",       "ats": "greenhouse", "token": "lyft"},
+    {"name": "Brex",       "ats": "greenhouse", "token": "brex"},
+    {"name": "Figma",      "ats": "greenhouse", "token": "figma"},
+    {"name": "Discord",    "ats": "greenhouse", "token": "discord"},
+    {"name": "Anthropic",  "ats": "greenhouse", "token": "anthropic"},
+    {"name": "Rippling",   "ats": "greenhouse", "token": "rippling"},
+    {"name": "GitLab",     "ats": "greenhouse", "token": "gitlab"},
+    {"name": "MongoDB",    "ats": "greenhouse", "token": "mongodb"},
+    {"name": "Grammarly",  "ats": "greenhouse", "token": "grammarly"},
+    {"name": "Samsara",    "ats": "greenhouse", "token": "samsara"},
+    {"name": "Flexport",   "ats": "greenhouse", "token": "flexport"},
+    # --- Ashby (jobs.ashbyhq.com/<token>) ---
+    {"name": "OpenAI",  "ats": "ashby", "token": "openai"},
+    {"name": "Ramp",    "ats": "ashby", "token": "ramp"},
+    {"name": "Notion",  "ats": "ashby", "token": "notion"},
+    {"name": "Mercury", "ats": "ashby", "token": "mercury"},
+    {"name": "Linear",  "ats": "ashby", "token": "linear"},
+    # Note: FAANG, Stripe, Netflix, etc. run custom ATSes and CANNOT be pulled here
+    # -- use native LinkedIn / company-careers alerts for those (see README).
+]
+
+# --------------------------------------------------------------------------
+# 2) Filters (override via env vars).
+# --------------------------------------------------------------------------
+# Title must contain at least one INCLUDE term...
+INCLUDE_TITLES = [t.strip().lower() for t in os.getenv(
+    "INCLUDE_TITLES",
+    "software engineer,software developer,swe,sde,backend engineer,engineer ii,engineer 2,se2,se ii"
+).split(",") if t.strip()]
+
+# ...and must contain NONE of these EXCLUDE terms (these imply > 4 yrs / wrong role).
+EXCLUDE_TITLES = [t.strip().lower() for t in os.getenv(
+    "EXCLUDE_TITLES",
+    "senior,sr.,sr ,staff,principal,lead,manager,director,architect,head of,intern,iii,iv, v ,level 3,l3,l4,l5"
+).split(",") if t.strip()]
+
+# Keep a role only if its stated experience minimum is <= MAX_YEARS
+# (roles that state no number are kept and labelled "exp: not stated").
+MAX_YEARS = int(os.getenv("MAX_YEARS", "4"))
+
+# "Hot / recently opened" = posted within this many hours. 26h suits a daily 5:30 run.
+WINDOW_HOURS = int(os.getenv("JOB_WINDOW_HOURS", "26"))
+
+NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
+NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")
+NOTIFY_WHEN_EMPTY = os.getenv("NOTIFY_WHEN_EMPTY", "false").lower() == "true"
+
+_UA = {"User-Agent": "morning-jobs/1.1 (+github actions)"}
+
+# Experience patterns. Ranges first ("2-12+ years" -> 2), then "<n> years ... experience".
+_EXP_RANGE = re.compile(r'(\d{1,2})\s*[-\u2013]\s*\d{1,2}\s*\+?\s*years?', re.I)
+_EXP_NEAR = re.compile(r'(\d{1,2})\s*\+?\s*years?(?:\s+[\w-]+){0,6}?\s+experience', re.I)
+_EXP_ANY = re.compile(r'(\d{1,2})\s*\+?\s*years?', re.I)
+_TAGS = re.compile(r'<[^>]+>')
+
+
+def _get_json(url):
+    req = urllib.request.Request(url, headers=_UA)
+    with urllib.request.urlopen(req, timeout=45) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _parse_iso(s):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _plain(text):
+    return html.unescape(_TAGS.sub(" ", text or ""))
+
+
+def min_years(text):
+    """Best-effort: smallest plausible years-of-experience minimum in the text."""
+    text = _plain(text)
+    nums = [int(n) for n in _EXP_RANGE.findall(text)]   # lower bound of any range
+    nums += [int(n) for n in _EXP_NEAR.findall(text)]
+    if not nums:
+        nums = [int(n) for n in _EXP_ANY.findall(text)]
+    nums = [n for n in nums if 0 < n <= 30]
+    return min(nums) if nums else None
+
+
+def title_ok(title):
+    t = f" {title.lower()} "
+    if INCLUDE_TITLES and not any(k in t for k in INCLUDE_TITLES):
+        return False
+    if any(k in t for k in EXCLUDE_TITLES):
+        return False
+    return True
+
+
+def fetch_greenhouse(token):
+    data = _get_json(f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true")
+    out = []
+    for j in data.get("jobs", []):
+        out.append({
+            "title": j.get("title", ""),
+            "url": j.get("absolute_url", ""),
+            "location": (j.get("location") or {}).get("name", ""),
+            "posted": _parse_iso(j.get("updated_at", "")),
+            "desc": j.get("content", ""),
+        })
+    return out
+
+
+def fetch_lever(token):
+    data = _get_json(f"https://api.lever.co/v0/postings/{token}?mode=json")
+    out = []
+    for j in data:
+        ts = j.get("createdAt")
+        posted = datetime.fromtimestamp(ts / 1000, tz=timezone.utc) if ts else None
+        cats = j.get("categories") or {}
+        lists = " ".join(f"{x.get('text','')} {x.get('content','')}" for x in (j.get("lists") or []))
+        desc = " ".join([j.get("descriptionPlain", ""), lists, j.get("additionalPlain", "")])
+        out.append({
+            "title": j.get("text", ""),
+            "url": j.get("hostedUrl", ""),
+            "location": cats.get("location", ""),
+            "posted": posted,
+            "desc": desc,
+        })
+    return out
+
+
+def fetch_ashby(token):
+    data = _get_json(f"https://api.ashbyhq.com/posting-api/job-board/{token}?includeCompensation=false")
+    out = []
+    for j in data.get("jobs", []):
+        if j.get("isListed") is False:
+            continue
+        out.append({
+            "title": j.get("title", ""),
+            "url": j.get("jobUrl") or j.get("applyUrl") or "",
+            "location": j.get("location", ""),
+            "posted": _parse_iso(j.get("publishedAt", "")),
+            "desc": j.get("descriptionPlain", "") or j.get("descriptionHtml", ""),
+        })
+    return out
+
+
+FETCHERS = {"greenhouse": fetch_greenhouse, "lever": fetch_lever, "ashby": fetch_ashby}
+
+
+def select(jobs):
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=WINDOW_HOURS)
+    keep = []
+    for j in jobs:
+        dt = j["posted"]
+        if dt is not None and dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if dt is None or dt < cutoff:
+            continue
+        if not title_ok(j["title"]):
+            continue
+        yrs = min_years(j["desc"])
+        if yrs is not None and yrs > MAX_YEARS:
+            continue
+        j["years"] = yrs
+        keep.append(j)
+    return keep
+
+
+def notify(title, body):
+    if not NTFY_TOPIC:
+        print("[notify] NTFY_TOPIC not set; skipping phone push.", file=sys.stderr)
+        return
+    req = urllib.request.Request(
+        f"{NTFY_SERVER}/{NTFY_TOPIC}",
+        data=body.encode("utf-8"),
+        method="POST",
+        headers={"Title": title, "Tags": "briefcase", **_UA},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=30)
+        print(f"[notify] pushed to {NTFY_SERVER}/{NTFY_TOPIC}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[notify] push failed: {e}", file=sys.stderr)
+
+
+def main():
+    found, errors = [], []
+    for c in COMPANIES:
+        fetch = FETCHERS.get(c.get("ats"))
+        token = c.get("token", "")
+        if fetch is None or token in ("", "REPLACE_ME"):
+            continue
+        try:
+            jobs = select(fetch(token))
+            for j in jobs:
+                j["company"] = c["name"]
+            found.extend(jobs)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{c['name']}: {e}")
+
+    found.sort(key=lambda j: j["posted"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+
+    if errors:
+        print("[warnings]\n  " + "\n  ".join(errors), file=sys.stderr)
+
+    if not found:
+        msg = f"No new SE2/SWE roles (<= {MAX_YEARS} yrs) in the last {WINDOW_HOURS}h."
+        print(msg)
+        if NOTIFY_WHEN_EMPTY:
+            notify("Morning jobs", msg)
+        return
+
+    lines = []
+    for j in found:
+        loc = f" \u2014 {j['location']}" if j["location"] else ""
+        exp = f"{j['years']}+ yrs" if j["years"] is not None else "exp: not stated"
+        lines.append(f"\u2022 {j['company']}: {j['title']}{loc}  [{exp}]\n  {j['url']}")
+    body = "\n".join(lines)
+    print(body)
+    notify(f"{len(found)} new SE2/SWE role(s) this morning", body)
+
+
+if __name__ == "__main__":
+    main()
