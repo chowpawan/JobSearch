@@ -62,9 +62,25 @@ Set these as repo secrets/variables or edit the workflow `env:` block:
 | `MAX_YEARS` | `4` | Keep a role only if its stated experience minimum is at or below this. Roles that state no number are kept and labelled "exp: not stated" |
 | `US_ONLY` | `true` | Keep only US, US-remote, and unspecified-location roles; drop clearly non-US ones |
 | `INCLUDE_TITLES` | software engineer, software developer, swe, sde, backend engineer, engineer ii, engineer 2, se2, se ii | Title must contain one of these |
-| `EXCLUDE_TITLES` | senior, sr., staff, principal, lead, manager, director, architect, head of, intern, iii, iv, l3, l4, l5 | Title is dropped if it contains any of these (filters out > 4-yr / wrong-level roles) |
-| `JOB_WINDOW_HOURS` | `48` | How recent a posting must be to count (48h gives more coverage; a role may notify on two consecutive mornings) |
+| `EXCLUDE_TITLES` | senior, sr., staff, principal, lead, manager, director, architect, head of, intern, iii, iv, l3, l4, l5 | Title is dropped if it contains any of these |
+| `MAX_NOTIFY` | `25` | Cap on roles listed in one notification (rest shown as "+N more") |
+| `JOB_WINDOW_HOURS` | `1440` | Sanity bound only (60 days) to ignore very stale postings — novelty is handled by the seen-list, not this |
 | `NOTIFY_WHEN_EMPTY` | `false` | Set `true` to also get a "nothing new" ping |
+
+### How "new" is detected (important)
+
+Greenhouse/Lever/Ashby only expose when a posting was last *edited*, not when it
+opened — so a time window can't reliably tell you what's new (this is why an
+early version surfaced only one company). Instead, the script keeps a
+`seen.json` list of roles it has already reported, persisted between runs by the
+workflow's **cache** step, and alerts only on roles not seen before.
+
+- **First run** is a *baseline*: it reports the current matching roles (up to
+  `MAX_NOTIFY`) and records them. This is your "everything open right now" pass.
+- **Every run after** reports only genuinely new postings.
+
+The `[summary]` line in the run log shows `boards reachable / skipped / matching
+/ new`, and `[warnings]` lists any company whose token didn't resolve.
 
 The experience cap reads each job description and pulls the smallest plausible
 "N years" figure (handling ranges like "2-12+ years" as a 2-year floor). It's a

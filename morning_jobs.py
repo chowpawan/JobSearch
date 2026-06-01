@@ -82,8 +82,12 @@ EXCLUDE_TITLES = [t.strip().lower() for t in os.getenv(
 # (roles that state no number are kept and labelled "exp: not stated").
 MAX_YEARS = int(os.getenv("MAX_YEARS", "4"))
 
-# "Hot / recently opened" = posted within this many hours.
-WINDOW_HOURS = int(os.getenv("JOB_WINDOW_HOURS", "48"))
+# Novelty is tracked via a "seen jobs" file persisted across runs (see workflow
+# cache step), so you get each role once. WINDOW_HOURS is just a sanity bound to
+# ignore very stale postings (default 60 days).
+WINDOW_HOURS = int(os.getenv("JOB_WINDOW_HOURS", "1440"))
+SEEN_FILE = os.getenv("SEEN_FILE", "seen.json")
+MAX_NOTIFY = int(os.getenv("MAX_NOTIFY", "25"))
 
 # Keep only US-based (or US-remote / unspecified) roles. Set US_ONLY=false to allow all.
 US_ONLY = os.getenv("US_ONLY", "true").lower() == "true"
@@ -262,8 +266,35 @@ def notify(title, body):
         print(f"[notify] push failed: {e}", file=sys.stderr)
 
 
+def load_seen():
+    try:
+        with open(SEEN_FILE) as f:
+            return set(json.load(f)), True
+    except (OSError, ValueError):
+        return set(), False  # first run (no usable seen file yet)
+
+
+def save_seen(ids):
+    try:
+        with open(SEEN_FILE, "w") as f:
+            json.dump(sorted(ids), f)
+    except OSError as e:  # noqa: BLE001
+        print(f"[seen] could not write {SEEN_FILE}: {e}", file=sys.stderr)
+
+
+def _format(jobs):
+    lines = []
+    for j in jobs[:MAX_NOTIFY]:
+        loc = f" \u2014 {j['location']}" if j["location"] else ""
+        exp = f"{j['years']}+ yrs" if j.get("years") is not None else "exp: not stated"
+        lines.append(f"\u2022 {j['company']}: {j['title']}{loc}  [{exp}]\n  {j['url']}")
+    if len(jobs) > MAX_NOTIFY:
+        lines.append(f"...and {len(jobs) - MAX_NOTIFY} more.")
+    return "\n".join(lines)
+
+
 def main():
-    found, errors, ok = [], [], 0
+    matching, errors, ok = [], [], 0
     for c in COMPANIES:
         fetch = FETCHERS.get(c.get("ats"))
         token = c.get("token", "")
@@ -274,33 +305,33 @@ def main():
             ok += 1
             for j in jobs:
                 j["company"] = c["name"]
-            found.extend(jobs)
+            matching.extend(jobs)
         except Exception as e:  # noqa: BLE001
             errors.append(f"{c['name']} ({c['ats']}/{token}): {e}")
 
-    found.sort(key=lambda j: j["posted"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    matching.sort(key=lambda j: j["posted"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
 
-    print(f"[summary] {ok}/{len(COMPANIES)} boards reachable, "
-          f"{len(errors)} skipped (bad/stale token), {len(found)} matching role(s).")
+    seen, had_seen = load_seen()
+    current_ids = {j["url"] for j in matching if j["url"]}
+    new_jobs = matching if not had_seen else [j for j in matching if j["url"] not in seen]
+    save_seen(current_ids)
+
+    print(f"[summary] {ok}/{len(COMPANIES)} boards reachable, {len(errors)} skipped, "
+          f"{len(matching)} matching role(s), {len(new_jobs)} new"
+          f"{' (first run = baseline)' if not had_seen else ''}.")
     if errors:
         print("[warnings] skipped boards -- fix or remove these tokens:\n  " + "\n  ".join(errors),
               file=sys.stderr)
 
-    if not found:
-        msg = f"No new SE2/SWE roles (<= {MAX_YEARS} yrs) in the last {WINDOW_HOURS}h."
-        print(msg)
+    if not new_jobs:
         if NOTIFY_WHEN_EMPTY:
-            notify("Morning jobs", msg)
+            notify("Morning jobs", "No new SE2/SWE roles today.")
         return
 
-    lines = []
-    for j in found:
-        loc = f" \u2014 {j['location']}" if j["location"] else ""
-        exp = f"{j['years']}+ yrs" if j["years"] is not None else "exp: not stated"
-        lines.append(f"\u2022 {j['company']}: {j['title']}{loc}  [{exp}]\n  {j['url']}")
-    body = "\n".join(lines)
+    body = _format(new_jobs)
     print(body)
-    notify(f"{len(found)} new SE2/SWE role(s) this morning", body)
+    label = "current SE2/SWE role(s) (baseline)" if not had_seen else "NEW SE2/SWE role(s)"
+    notify(f"{len(new_jobs)} {label}", body)
 
 
 if __name__ == "__main__":

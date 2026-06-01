@@ -3,8 +3,7 @@ name: morning-jobs
 on:
   schedule:
     # GitHub cron is UTC. 12:30 UTC = 5:30 AM Pacific during PDT (summer).
-    # In winter (PST) it arrives at 4:30 AM; switch to "30 13 * * *" then,
-    # or accept the one-hour seasonal drift.
+    # In winter (PST) it arrives at 4:30 AM; switch to "30 13 * * *" then.
     - cron: "30 12 * * *"
   workflow_dispatch: {}   # run on demand from the Actions tab
 
@@ -12,14 +11,25 @@ jobs:
   pull:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5   # Node 24, no deprecation warning
-      - name: Pull hot jobs and push notification
+      - uses: actions/checkout@v5            # Node 24, no deprecation warning
+
+      # Persists seen.json between runs so you get each role only once.
+      # Rolling cache: save under a unique key each run, restore the latest.
+      - name: Restore seen-jobs state
+        uses: actions/cache@v5
+        with:
+          path: seen.json
+          key: seen-jobs-${{ github.run_id }}
+          restore-keys: |
+            seen-jobs-
+
+      - name: Pull new roles and push notification
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           MAX_YEARS: "4"
-          JOB_WINDOW_HOURS: "48"
           US_ONLY: "true"
+          # MAX_NOTIFY: "25"
           # INCLUDE_TITLES: "software engineer,swe,sde,backend engineer,engineer ii,se2"
           # EXCLUDE_TITLES: "senior,staff,principal,lead,manager,director,iii,iv"
           # NOTIFY_WHEN_EMPTY: "false"
-        run: python3 morning_jobs.py   # runner's preinstalled Python 3; script is stdlib-only
+        run: python3 morning_jobs.py          # runner's preinstalled Python 3; stdlib only
